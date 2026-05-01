@@ -1,0 +1,1005 @@
+{
+  "name": "TASTEWISE - Gong to SFDC Agent",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Tastewise Gong→SFDC Agent (v6: Two-Agent w/ Tool-Using Reviewer)\n**Build by Gonzalo Insua** — Take-home for Tastewise Revenue AI team\n\n**Architecture**:\n- Phase 1: pre-processing & parsing (deterministic).\n- Phase 2: **extraction_agent** (Haiku 4.5) emits JSON draft. No tools.\n- Phase 3: **review_agent** (Sonnet 4.5) verifies draft. Has 3 ai_tools attached, NO transcript visibility — must call tools to do its job. Emits verdict {action: approve|revise|abstain, final_payload, ...}.\n- Phase 4: review_post_normalizer scores verdict (5 deterministic checks). IF quality_score >= 4 → use review's verdict; ELSE → fallback to deterministic chain (call_quote_grounding → schema → uncertainty).\n- Phase 5: unify tags meta.path_taken & quality_score, returns final SFDC payload.\n\nPer OPP, exactly one branch fires. Demo is honest.",
+        "height": 340,
+        "width": 960
+      },
+      "id": "sticky-overview",
+      "name": "Sticky Note",
+      "position": [
+        32,
+        -320
+      ],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "content": "### Phase 1 — Foundation\n`Manual Trigger` → `raw_transcripts_source` → `text_pre_processor` → `transcript_reader`.",
+        "height": 140,
+        "width": 960
+      },
+      "id": "sticky-phase-marker",
+      "name": "Sticky Note Phase 1",
+      "position": [
+        96,
+        48
+      ],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "position": [
+        256,
+        576
+      ],
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "raw-dump-field",
+              "name": "raw_dump",
+              "type": "string",
+              "value": "Provided: mock transcripts\n\nTranscript 1\n`\n[00:02] AE: Thanks for the time, Priya. Last time we left off you were going to loop in Ben from Procurement.\n[00:18] Priya: Yeah — Ben's in the next call. He's fine with the $120k range but wants annual not quarterly.\n[00:34] AE: Understood. And on the evaluation criteria — is speed-to-insight still #1?\n[00:45] Priya: Speed is #1. Second is how well it integrates with our innovation stage-gate. We'd want that in writing.\n[01:22] AE: Noted. On timing — still targeting Q3 kickoff?\n[01:30] Priya: Actually pushing to early Q4 now. Our 2027 portfolio review moved.\n[02:05] AE: Okay. So on my side — I'll send a revised quote tonight annual, and a one-pager on stage-gate integration by Friday. You'll loop in Ben for next Tuesday?\n[02:20] Priya: Yes. Ben, me, and our CMO. CMO will be the signer.\n[02:45] AE: Perfect. Any concerns from your side?\n[02:55] Priya: One. I saw Spoonshot in market last week. The demo was lightweight but the price was aggressive. You'll need to be ready for that.\n`\n\nTranscript 2\n`\n[00:02] AE: Hey! How was the trip?\n[00:06] Champion: Oh amazing, went to Lisbon. You been?\n[00:10] AE: Never. On the list.\n[00:14] Champion: Highly recommend. Anyway — I know we had this on the calendar, but honestly I don't have much new. Still waiting to hear back from finance.\n[00:40] AE: Totally fine. Any sense of timing?\n[00:44] Champion: Maybe two weeks? I'll ping you.\n[00:50] AE: Sounds good. Keep me posted.\n``"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "raw-transcripts-source",
+      "name": "raw_transcripts_source",
+      "position": [
+        480,
+        576
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst rawDump = input.raw_dump;\n\nif (!rawDump || typeof rawDump !== \"string\") {\n  throw new Error(\"text_pre_processor: raw_dump missing or not a string\");\n}\n\nconst normalized = rawDump\n  .replace(/[—–]/g, \"-\")\n  .replace(/[“”‘’]/g, \"\\\"\");\n\nconst TRANSCRIPT_RE = /Transcript\\s+(\\d+)[^`]*`([\\s\\S]+?)`/g;\nconst GROUND_TRUTH_BY_NUMBER = { 1: \"rich\", 2: \"thin\" };\n\nconst items = [];\nlet match;\nwhile ((match = TRANSCRIPT_RE.exec(normalized)) !== null) {\n  const transcriptNumber = parseInt(match[1], 10);\n  const rawContent = match[2];\n  const content = rawContent.split(/\\r?\\n/).map(l=>l.trim()).filter(l=>l.length>0).join(\"\\n\");\n  if (content.length === 0) continue;\n  const opportunity_id = \"OPP-\" + String(transcriptNumber).padStart(3, \"0\");\n  const fixture_id = GROUND_TRUTH_BY_NUMBER[transcriptNumber] || \"unknown\";\n  items.push({json: {opportunity_id, transcript_raw: content, _test_meta: {fixture_id, transcript_number: transcriptNumber, utterance_lines: content.split(\"\\n\").length, loaded_at: new Date().toISOString()}}});\n}\nif (items.length === 0) throw new Error(\"text_pre_processor: no transcripts found\");\nreturn items;\n"
+      },
+      "id": "text-pre-processor",
+      "name": "text_pre_processor",
+      "position": [
+        704,
+        576
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// runOnceForEachItem mode: $json is the current item (no need for $input.first())\nconst body = $json.body ?? $json;\nconst opportunity_id = body.opportunity_id;\nconst transcript_raw = body.transcript_raw;\nif (!opportunity_id || typeof opportunity_id !== \"string\") throw new Error(\"transcript_reader: opportunity_id missing\");\nif (!transcript_raw || typeof transcript_raw !== \"string\") throw new Error(\"transcript_reader: transcript_raw missing\");\n\nconst LINE_RE = /^\\s*\\[(\\d{1,2}):(\\d{2})\\]\\s*([^:]+?):\\s*(.+?)\\s*$/;\nconst utterances = [];\nconst speakersSet = new Set();\nlet wordCount = 0;\ntranscript_raw.split(/\\r?\\n/).forEach(line => {\n  if (!line.trim()) return;\n  const m = line.match(LINE_RE); if (!m) return;\n  const minutes = parseInt(m[1], 10), seconds = parseInt(m[2], 10);\n  const speaker = m[3].trim(), text = m[4].trim();\n  utterances.push({line_index: utterances.length, timestamp_raw: '['+m[1].padStart(2,'0')+':'+m[2]+']', timestamp_seconds: minutes*60+seconds, speaker, text});\n  speakersSet.add(speaker);\n  wordCount += text.split(/\\s+/).filter(Boolean).length;\n});\nif (utterances.length === 0) throw new Error('transcript_reader: no parseable utterances');\nconst output = {opportunity_id, utterances, metadata: {total_utterances: utterances.length, duration_seconds: utterances[utterances.length-1].timestamp_seconds, speakers: Array.from(speakersSet), estimated_word_count: wordCount, parsed_at: new Date().toISOString()}};\nif ($json._test_meta) output._test_meta = $json._test_meta;\nreturn { json: output };\n"
+      },
+      "id": "transcript-reader",
+      "name": "transcript_reader",
+      "position": [
+        928,
+        576
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "content": "### Phase 2 — Extraction Agent (Haiku 4.5, NO tools)\nEmits JSON draft only. maxTries=1, maxIterations=3, maxTokens=4000.",
+        "height": 140,
+        "width": 480
+      },
+      "id": "sticky-phase2",
+      "name": "Sticky Note Phase 2",
+      "position": [
+        1280,
+        -160
+      ],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "loop-over-items",
+      "name": "loop_over_items",
+      "position": [
+        1152,
+        576
+      ],
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "cachedResultName": "claude-haiku-4-5",
+          "mode": "list",
+          "value": "claude-haiku-4-5"
+        },
+        "options": {
+          "maxTokensToSample": 4000,
+          "temperature": 0
+        }
+      },
+      "id": "extraction-model",
+      "name": "extraction_model",
+      "position": [
+        1456,
+        800
+      ],
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Process this Gong sales call transcript and emit ONLY a JSON object (no prose, no markdown fences) matching the schema in the system message.\n\nopportunity_id: {{ $json.opportunity_id }}\n\nutterances:\n{{ JSON.stringify($json.utterances, null, 2) }}",
+        "options": {
+          "systemMessage": "=You are an extraction agent for Tastewise Revenue AI. Emit a single JSON object draft. Downstream tools verify quotes, schema, abstain.\n\n# RESPONSE\n- ONLY a JSON object. No prose, no fences. First character `{`.\n- No tool calls.\n\n# SCHEMA\n{ opportunity_id, abstain, abstain_reason, payload, reasoning_trace }\n\n## payload (abstain=false)\n- opportunity_id: string\n- stage: prospecting|discovery|solution_design|proposal|negotiation|closed_won|closed_lost\n- amount_usd: number|null\n- close_date: ISO YYYY-MM-DD|null\n- next_step: {description,owner,due_date}|null\n- meddpicc: 8 strings (metrics,economic_buyer,decision_criteria,decision_process,paper_process,identify_pain,champion,competition). \"\" for no signal, NEVER null.\n- risks: string[]\n- last_touch_summary: 1 sentence\n- confidence: 0..1\n\n## payload (abstain=true)\nALL fields null EXCEPT opportunity_id, last_touch_summary, confidence. abstain_reason explains.\n\n## reasoning_trace\n[{field, value, quote (verbatim), timestamp ([MM:SS]=utterance.timestamp_raw), utterance_index}]. [] when abstain=true.\n\n# WHEN TO ABSTAIN\nSmall talk dominates, no commitments, vague timing without owner+date.\n\n# RULES\n- quote MUST appear verbatim in utterance.text at cited timestamp.\n- timestamp MUST equal utterance.timestamp_raw exactly.\n- Don't invent. Don't paraphrase.\n\n# CRITICAL: QUOTE GROUNDING\nThe `quote` you cite MUST contain the actual VALUE you are claiming, not just adjacent context.\n- BAD: claim `champion: Priya` with quote \"You'll loop in Ben for next Tuesday?\" — the quote does not contain \"Priya\" or any signal that Priya is the champion.\n- GOOD: claim `champion: Priya` with quote \"Thanks for the time, Priya\" or \"Yes. Ben, me, and our CMO.\" (if Priya is the speaker confirming her involvement).\nBefore writing each reasoning_trace entry, check: does this quote literally contain words that prove the claimed value? If not, find a different quote or omit the field.\n\n# CRITICAL: DATE INTERPRETATION (close_date, due_date)\nWhen the transcript references a quarter or year ambiguously, interpret as the NEAREST FUTURE date that fits, not a far-future one.\n- Today's reference frame: assume current year is 2026 unless transcript says otherwise.\n- \"Q4\" alone → next Q4 (Q4 2026).\n- \"early Q4\" → October of the nearest future year.\n- A mention of a different year (e.g., \"2027 portfolio review\") is context, NOT necessarily the close date. The portfolio review being in 2027 does not mean the deal closes in 2027.\n- If transcript says \"pushing to early Q4\" with a current year mention of 2027 elsewhere, the close_date is most likely 2026-10-15 (early Q4 of the current year), unless explicitly stated as 2027.\n- For due_date on next_step: if the transcript says \"by Friday\" or \"next Tuesday\", calculate from a reasonable current date (assume early May 2026 for these test transcripts).\n\n# EXAMPLE (rich)\n{\"opportunity_id\":\"OPP-001\",\"abstain\":false,\"abstain_reason\":null,\"payload\":{\"opportunity_id\":\"OPP-001\",\"stage\":\"proposal\",\"amount_usd\":120000,\"close_date\":\"2026-10-15\",\"next_step\":{\"description\":\"Send revised quote\",\"owner\":\"AE\",\"due_date\":\"2026-05-02\"},\"meddpicc\":{\"metrics\":\"\",\"economic_buyer\":\"CMO\",\"decision_criteria\":\"Speed-to-insight\",\"decision_process\":\"\",\"paper_process\":\"Annual\",\"identify_pain\":\"\",\"champion\":\"Priya\",\"competition\":\"Spoonshot\"},\"risks\":[\"Spoonshot price competition\"],\"last_touch_summary\":\"Priya confirmed $120k annual.\",\"confidence\":0.85},\"reasoning_trace\":[{\"field\":\"amount_usd\",\"value\":120000,\"quote\":\"He's fine with the $120k range\",\"timestamp\":\"[00:18]\",\"utterance_index\":1},{\"field\":\"champion\",\"value\":\"Priya\",\"quote\":\"Thanks for the time, Priya\",\"timestamp\":\"[00:02]\",\"utterance_index\":0},{\"field\":\"close_date\",\"value\":\"2026-10-15\",\"quote\":\"Actually pushing to early Q4 now\",\"timestamp\":\"[01:30]\",\"utterance_index\":5}]}\n\n# EXAMPLE (abstain)\n{\"opportunity_id\":\"OPP-002\",\"abstain\":true,\"abstain_reason\":\"Vague, no commitment.\",\"payload\":{\"opportunity_id\":\"OPP-002\",\"stage\":null,\"amount_usd\":null,\"close_date\":null,\"next_step\":null,\"meddpicc\":null,\"risks\":null,\"last_touch_summary\":\"Off-topic, follow up in 2 weeks.\",\"confidence\":0.95},\"reasoning_trace\":[]}\n\nFirst character `{`. JSON only.",
+          "maxIterations": 3
+        }
+      },
+      "id": "extraction-agent",
+      "name": "extraction_agent",
+      "position": [
+        1376,
+        576
+      ],
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "maxTries": 1,
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// extraction_post_normalizer\n// Per-OPP: reads agent's output (current item) AND the corresponding loop item from\n// loop_over_items (NOT from transcript_reader directly, because transcript_reader\n// outputs 2 items and .first() always returns OPP-001).\n\nconst input = $input.first().json;\n\n// Pull the current OPP's data from the loop_over_items output (process branch).\n// $('loop_over_items').first() returns the current iteration's item.\nconst loopJson = $('loop_over_items').first().json;\nconst opportunity_id_from_input = loopJson.opportunity_id;\nconst utterances = loopJson.utterances || [];\nconst test_meta = loopJson._test_meta || null;\n\nfunction safeParse(data) {\n  if (data === null || data === undefined) return null;\n  if (typeof data === 'object') return data;\n  if (typeof data !== 'string') return null;\n  try { return JSON.parse(data.trim()); } catch (e) {}\n  const fenced = data.replace(/^\\s*```json\\s*/i,'').replace(/^\\s*```\\s*/i,'').replace(/\\s*```\\s*$/i,'').trim();\n  try { return JSON.parse(fenced); } catch (e) {}\n  const fb = data.indexOf('{'), lb = data.lastIndexOf('}');\n  if (fb !== -1 && lb > fb) { try { return JSON.parse(data.substring(fb, lb+1)); } catch (e) {} }\n  const fm = data.match(/```json\\s*([\\s\\S]*?)```/i);\n  if (fm && fm[1]) { try { return JSON.parse(fm[1].trim()); } catch (e) {} }\n  return null;\n}\nfunction extractFinalShape(p) {\n  if (!p || typeof p !== 'object') return null;\n  if (p.type === 'object' && p.properties) return null;\n  if (p.abstain !== undefined && p.payload) return p;\n  if (p.output && p.output.abstain !== undefined) return p.output;\n  if (p.text && p.text.abstain !== undefined) return p.text;\n  return null;\n}\nfunction truncate(s, max) { if (typeof s !== 'string') return ''; return s.length > max ? s.substring(0, max-3)+'...' : s; }\n\nlet rawOutput = '';\nif (typeof input.output === 'string') rawOutput = input.output;\nelse if (typeof input.text === 'string') rawOutput = input.text;\nelse if (input.output && typeof input.output === 'object') rawOutput = JSON.stringify(input.output);\nelse rawOutput = JSON.stringify(input);\n\nconst direct = extractFinalShape(input);\nconst parsed = direct ? input : safeParse(rawOutput);\nconst finalShape = direct || extractFinalShape(parsed);\n\nif (!finalShape) {\n  return [{ json: {\n    opportunity_id: opportunity_id_from_input,\n    draft_payload: {opportunity_id: opportunity_id_from_input, stage: null, amount_usd: null, close_date: null, next_step: null, meddpicc: null, risks: null, last_touch_summary: 'extraction_failed', confidence: 0.05},\n    draft_abstain: true, draft_abstain_reason: 'extraction_post_normalizer_failed: no JSON shape',\n    draft_reasoning_trace: [], evidence_list: [],\n    utterances, sonnet_decision: {abstain: true, confidence: 0.05},\n    _test_meta: test_meta, _raw_agent_output: truncate(rawOutput, 1000), _error: true\n  }}];\n}\n\nconst draft = finalShape.payload || {};\ndraft.opportunity_id = opportunity_id_from_input || draft.opportunity_id;\nif (typeof draft.last_touch_summary === 'string') draft.last_touch_summary = truncate(draft.last_touch_summary, 500);\n\nconst reasoningTrace = Array.isArray(finalShape.reasoning_trace) ? finalShape.reasoning_trace : [];\nconst evidence_list = reasoningTrace.filter(r => r && r.field && r.quote && r.timestamp).map(r => ({field: r.field, value: r.value, quote: r.quote, timestamp: r.timestamp}));\n\nreturn [{ json: {\n  opportunity_id: opportunity_id_from_input,\n  draft_payload: draft,\n  draft_abstain: finalShape.abstain === true,\n  draft_abstain_reason: finalShape.abstain_reason || null,\n  draft_reasoning_trace: reasoningTrace,\n  evidence_list, utterances,\n  sonnet_decision: {abstain: finalShape.abstain === true, confidence: typeof draft.confidence === 'number' ? draft.confidence : 0.5},\n  _test_meta: test_meta\n}}];\n"
+      },
+      "id": "extraction-post-normalizer",
+      "name": "extraction_post_normalizer",
+      "position": [
+        1728,
+        576
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "content": "### Phase 3 — Review Agent (Sonnet 4.5, WITH 3 ai_tools)\nReceives draft + reasoning_trace ONLY (no transcript). MUST call tools to verify. Decides approve/revise/abstain. This is where genuine tool-using happens.",
+        "width": 1100
+      },
+      "id": "sticky-phase3",
+      "name": "Sticky Note Phase 3",
+      "position": [
+        1904,
+        -160
+      ],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "cachedResultName": "claude-sonnet-4-5",
+          "mode": "list",
+          "value": "claude-sonnet-4-5"
+        },
+        "options": {
+          "maxTokensToSample": 2000,
+          "temperature": 0
+        }
+      },
+      "id": "review-model",
+      "name": "review_model",
+      "position": [
+        1952,
+        800
+      ],
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "description": "Verify every quote in evidence_list appears verbatim in source utterances. utterances is auto-bound from upstream — you only provide evidence_list. Returns {all_grounded, failed_fields[], total_claims, grounded_count, summary}. Pass evidence_list:[] for abstain mode.",
+        "workflowId": {
+          "__rl": true,
+          "value": "sGrXr4tDma2CYmSg",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "utterances": "={{ $('extraction_post_normalizer').first().json.utterances }}",
+            "evidence_list": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('evidence_list', ``, 'json') }}"
+          },
+          "matchingColumns": [
+            "evidence_list"
+          ],
+          "schema": [
+            {
+              "id": "utterances",
+              "displayName": "utterances",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array"
+            },
+            {
+              "id": "evidence_list",
+              "displayName": "evidence_list",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "tool-quote-grounding",
+      "name": "tool_quote_grounding",
+      "position": [
+        2080,
+        800
+      ],
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "description": "Validate candidate_payload against SFDC-lite schema. Pass abstain_mode:true if abstaining (only opportunity_id, last_touch_summary, confidence required; everything else MUST be null). Pass abstain_mode:false for full updates. Returns {valid, errors[], warnings[]}.",
+        "workflowId": {
+          "__rl": true,
+          "value": "KAMjQcUZhlFTN750",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "candidate_payload": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('candidate_payload', ``, 'json') }}",
+            "abstain_mode": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('abstain_mode', ``, 'boolean') }}"
+          },
+          "matchingColumns": [
+            "candidate_payload",
+            "abstain_mode"
+          ],
+          "schema": [
+            {
+              "id": "candidate_payload",
+              "displayName": "candidate_payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "abstain_mode",
+              "displayName": "abstain_mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "boolean",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "tool-schema-validator",
+      "name": "tool_schema_validator",
+      "position": [
+        2208,
+        800
+      ],
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "description": "Heuristic abstain reviewer. utterances and sonnet_decision are auto-bound from upstream — you only provide draft_payload. Returns {should_abstain, signal_strength: none|weak|moderate|strong, reason, overrides_sonnet, flags[]}. If overrides_sonnet:true OR signal in {weak,none}, ABSTAIN.",
+        "workflowId": {
+          "__rl": true,
+          "value": "wK8Nl7IKfk6I2PP4",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "utterances": "={{ $('extraction_post_normalizer').first().json.utterances }}",
+            "sonnet_decision": "={{ $('extraction_post_normalizer').first().json.sonnet_decision }}",
+            "draft_payload": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('draft_payload', ``, 'json') }}"
+          },
+          "matchingColumns": [
+            "draft_payload"
+          ],
+          "schema": [
+            {
+              "id": "utterances",
+              "displayName": "utterances",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array"
+            },
+            {
+              "id": "draft_payload",
+              "displayName": "draft_payload",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "sonnet_decision",
+              "displayName": "sonnet_decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "tool-uncertainty-check",
+      "name": "tool_uncertainty_check",
+      "position": [
+        2336,
+        800
+      ],
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Review this extraction draft. You CANNOT see the transcript directly — you must call tools.\n\nopportunity_id: {{ $json.opportunity_id }}\n\ndraft_payload (extraction agent's proposal):\n{{ JSON.stringify($json.draft_payload) }}\n\nreasoning_trace (claims to verify):\n{{ JSON.stringify($json.draft_reasoning_trace) }}\n\nevidence_list (pass this to quote_grounding):\n{{ JSON.stringify($json.evidence_list) }}\n\ndraft_abstain: {{ $json.draft_abstain }}\n\nCall quote_grounding(evidence_list), then schema_validator(candidate_payload=draft_payload, abstain_mode=draft_abstain), then uncertainty_check(draft_payload). Then emit verdict.",
+        "options": {
+          "systemMessage": "=You verify SFDC update drafts using tools. Output JSON only — first character must be `{`.\n\n# WORKFLOW (strict)\n\n## If draft_abstain is FALSE (rich extraction):\n1. Call quote_grounding with the evidence_list. Note failed_fields.\n2. Call schema_validator(candidate_payload=draft_payload, abstain_mode=false). Note errors.\n3. Call uncertainty_check(draft_payload). Note signal_strength + overrides_sonnet.\n4. Decide:\n   - failed_fields non-empty → REVISE (drop those fields)\n   - schema invalid → REVISE or ABSTAIN if unfixable\n   - overrides_sonnet OR signal in {weak,none} → ABSTAIN\n   - else → APPROVE\n\n## If draft_abstain is TRUE (extraction self-abstained — evidence_list is []):\n1. DO NOT call quote_grounding. There is nothing to ground in an abstain (empty evidence_list).\n2. Call schema_validator(candidate_payload=draft_payload, abstain_mode=true) to verify the abstain shape is correct.\n3. Call uncertainty_check(draft_payload) to confirm the abstain decision.\n4. Decide:\n   - schema_validator says abstain shape is invalid → fix and re-emit as ABSTAIN.\n   - uncertainty_check disagrees (signal=strong, overrides_sonnet=true) → this is rare; emit REVISE with the original draft.\n   - else → APPROVE the abstain (action='abstain').\n\n# OUTPUT\n{\"action\":\"approve|revise|abstain\",\"final_payload\":{...},\"final_reasoning_trace\":[...],\"reason\":\"...\",\"tool_summary\":{\"quote_grounding\":{\"all_grounded\":bool,\"failed_fields\":[]} OR null if not called,\"schema\":{\"valid\":bool,\"errors\":[]},\"uncertainty\":{\"signal_strength\":\"...\",\"overrides_sonnet\":bool}}}\n\n# SHAPES\n- approve (rich draft accepted): final_payload = draft_payload unchanged, final_reasoning_trace = original.\n- approve (abstain confirmed): final_payload = abstain shape, final_reasoning_trace = [], action = \"abstain\".\n- revise: final_payload = draft minus failed_fields (null or \"\" for meddpicc), schema errors fixed. final_reasoning_trace excludes failed.\n- abstain: final_payload all null EXCEPT opportunity_id, last_touch_summary, confidence. final_reasoning_trace = [].\n\nNo prose. JSON only. Tools first.\n\n# CRITICAL\nNEVER call quote_grounding with an empty evidence_list — it will error. If draft_abstain is true, skip quote_grounding entirely.",
+          "maxIterations": 8
+        }
+      },
+      "id": "review-agent",
+      "name": "review_agent",
+      "position": [
+        2080,
+        576
+      ],
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "maxTries": 1,
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// review_post_normalizer: parses verdict, computes 5-point quality_score.\n// Check #4 (tools_invoked) reads the agent's tool_summary field rather than\n// $('tool_xxx').all().length — the latter doesn't see ai_tool sub-executions\n// in n8n's LangChain agent (sub-executions don't surface as main-flow children).\n\nconst input = $input.first().json;\nconst carry = $('extraction_post_normalizer').first().json;\n\nfunction safeParse(data) {\n  if (data === null || data === undefined) return null;\n  if (typeof data === 'object') return data;\n  if (typeof data !== 'string') return null;\n  try { return JSON.parse(data.trim()); } catch (e) {}\n  const fenced = data.replace(/^\\s*```json\\s*/i,'').replace(/^\\s*```\\s*/i,'').replace(/\\s*```\\s*$/i,'').trim();\n  try { return JSON.parse(fenced); } catch (e) {}\n  const fb = data.indexOf('{'), lb = data.lastIndexOf('}');\n  if (fb !== -1 && lb > fb) { try { return JSON.parse(data.substring(fb, lb+1)); } catch (e) {} }\n  return null;\n}\n\nlet rawOutput = '';\nif (typeof input.output === 'string') rawOutput = input.output;\nelse if (typeof input.text === 'string') rawOutput = input.text;\nelse if (input.output && typeof input.output === 'object') rawOutput = JSON.stringify(input.output);\nelse rawOutput = JSON.stringify(input);\n\nconst verdict = safeParse(rawOutput) || (input.output && typeof input.output === 'object' ? input.output : null);\n\n// --- 5-point quality score ---\nlet score = 0;\nconst checks = {};\n\n// Check 1: parseable JSON\nchecks.parseable = !!verdict;\nif (checks.parseable) score++;\n\n// Check 2: valid action\nconst validActions = ['approve','revise','abstain'];\nchecks.valid_action = !!verdict && validActions.includes(verdict.action);\nif (checks.valid_action) score++;\n\n// Check 3: final_payload has expected keys\nchecks.payload_shape = !!(verdict && verdict.final_payload && typeof verdict.final_payload === 'object' && 'opportunity_id' in verdict.final_payload && 'last_touch_summary' in verdict.final_payload);\nif (checks.payload_shape) score++;\n\n// Check 4: agent reported tool_summary with non-empty content\n// Reading the agent's verdict (not n8n node executions, which don't surface ai_tool sub-runs).\nlet toolSummaryEvidence = 0;\nif (verdict && verdict.tool_summary && typeof verdict.tool_summary === 'object') {\n  const ts = verdict.tool_summary;\n  if (ts.quote_grounding && typeof ts.quote_grounding.all_grounded === 'boolean') toolSummaryEvidence++;\n  if (ts.schema && typeof ts.schema.valid === 'boolean') toolSummaryEvidence++;\n  if (ts.uncertainty && typeof ts.uncertainty.signal_strength === 'string') toolSummaryEvidence++;\n}\nchecks.tools_invoked = toolSummaryEvidence >= 2;\nchecks.tool_summary_evidence_count = toolSummaryEvidence;\nif (checks.tools_invoked) score++;\n\n// Check 5: internal consistency\nlet consistent = false;\nif (verdict && verdict.action) {\n  if (verdict.action === 'abstain') consistent = !!(verdict.reason && verdict.reason.length > 0);\n  else if (verdict.action === 'approve') consistent = !!(verdict.final_payload && verdict.final_payload.last_touch_summary);\n  else if (verdict.action === 'revise') consistent = !!(verdict.final_payload && typeof verdict.final_payload === 'object');\n}\nchecks.internally_consistent = consistent;\nif (checks.internally_consistent) score++;\n\nreturn [{ json: {\n  ...carry,\n  review_verdict: verdict,\n  quality_score: score,\n  quality_checks: checks,\n  _raw_review_output: typeof rawOutput === 'string' ? rawOutput.substring(0, 1500) : null\n}}];\n"
+      },
+      "id": "review-post-normalizer",
+      "name": "review_post_normalizer",
+      "position": [
+        2544,
+        576
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "content": "### Phase 4 — Quality Gate + Branching\nIF score >= 4 → use review verdict (left). ELSE → deterministic fallback chain (right).",
+        "height": 140,
+        "width": 1100
+      },
+      "id": "sticky-phase4",
+      "name": "Sticky Note Phase 4",
+      "position": [
+        1904,
+        48
+      ],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "score-gte-4",
+              "leftValue": "={{ $json.quality_score }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-quality-gate",
+      "name": "IF_quality_gate",
+      "position": [
+        2768,
+        576
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "jsCode": "// finalize_from_review: review verdict accepted. Pass through review's final shape.\nconst data = $input.first().json;\nconst verdict = data.review_verdict || {};\nconst finalPayload = verdict.final_payload || data.draft_payload || {};\nconst finalTrace = Array.isArray(verdict.final_reasoning_trace) ? verdict.final_reasoning_trace : (Array.isArray(data.draft_reasoning_trace) ? data.draft_reasoning_trace : []);\nconst action = verdict.action || 'approve';\nconst abstain = action === 'abstain';\nreturn [{ json: {\n  opportunity_id: data.opportunity_id,\n  abstain,\n  abstain_reason: abstain ? (verdict.reason || data.draft_abstain_reason || 'review_agent abstain') : null,\n  payload: finalPayload,\n  reasoning_trace: abstain ? [] : finalTrace,\n  validation: {\n    review_verdict_action: action,\n    review_verdict_reason: verdict.reason || null,\n    tool_summary: verdict.tool_summary || null,\n    quality_checks: data.quality_checks\n  },\n  meta: {\n    processed_at: new Date().toISOString(),\n    agent_model: 'claude-haiku-4-5',\n    reviewer_model: 'claude-sonnet-4-5',\n    path_taken: 'review_agent',\n    review_quality_score: data.quality_score,\n    tool_invocation_count: data.quality_checks ? data.quality_checks.tool_invocation_count : null,\n    _test_meta: data._test_meta\n  }\n}}];\n"
+      },
+      "id": "finalize-from-review",
+      "name": "finalize_from_review",
+      "position": [
+        4112,
+        480
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "sGrXr4tDma2CYmSg",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "utterances": "={{ $json.utterances }}",
+            "evidence_list": "={{ $json.evidence_list }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "utterances",
+              "displayName": "utterances",
+              "required": true,
+              "type": "array",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            },
+            {
+              "id": "evidence_list",
+              "displayName": "evidence_list",
+              "required": true,
+              "type": "array",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "call-quote-grounding",
+      "name": "call_quote_grounding",
+      "position": [
+        2992,
+        672
+      ],
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2
+    },
+    {
+      "parameters": {
+        "jsCode": "const grounding = $input.first().json;\nconst carry = $('review_post_normalizer').first().json;\nreturn [{ json: { ...carry, grounding_result: grounding } }];\n"
+      },
+      "id": "merge-grounding",
+      "name": "merge_grounding",
+      "position": [
+        3216,
+        672
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "KAMjQcUZhlFTN750",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "candidate_payload": "={{ $json.draft_payload }}",
+            "abstain_mode": "={{ $json.draft_abstain }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "candidate_payload",
+              "displayName": "candidate_payload",
+              "required": true,
+              "type": "object",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            },
+            {
+              "id": "abstain_mode",
+              "displayName": "abstain_mode",
+              "required": true,
+              "type": "boolean",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "call-schema-validator",
+      "name": "call_schema_validator",
+      "position": [
+        3440,
+        672
+      ],
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2
+    },
+    {
+      "parameters": {
+        "jsCode": "const schema = $input.first().json;\nconst carry = $('merge_grounding').first().json;\nreturn [{ json: { ...carry, schema_result: schema } }];\n"
+      },
+      "id": "merge-schema",
+      "name": "merge_schema",
+      "position": [
+        3664,
+        672
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "wK8Nl7IKfk6I2PP4",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "utterances": "={{ $json.utterances }}",
+            "draft_payload": "={{ $json.draft_payload }}",
+            "sonnet_decision": "={{ $json.sonnet_decision }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "utterances",
+              "displayName": "utterances",
+              "required": true,
+              "type": "array",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            },
+            {
+              "id": "draft_payload",
+              "displayName": "draft_payload",
+              "required": true,
+              "type": "object",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            },
+            {
+              "id": "sonnet_decision",
+              "displayName": "sonnet_decision",
+              "required": true,
+              "type": "object",
+              "display": true,
+              "canBeUsedToMatch": true,
+              "defaultMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "call-uncertainty-check",
+      "name": "call_uncertainty_check",
+      "position": [
+        3888,
+        672
+      ],
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2
+    },
+    {
+      "parameters": {
+        "jsCode": "// merge_validations: deterministic fallback final shape\nconst uncertainty = $input.first().json;\nconst carry = $('merge_schema').first().json;\nconst grounding = carry.grounding_result || {};\nconst schema = carry.schema_result || {};\n\nconst agentAbstained = carry.draft_abstain === true;\nconst overrideAbstain = uncertainty.overrides_sonnet === true;\nconst signalAbstain = uncertainty.signal_strength === 'weak' || uncertainty.signal_strength === 'none';\nconst schemaInvalid = schema.valid === false;\nconst final_abstain = agentAbstained || overrideAbstain || signalAbstain || schemaInvalid;\n\nlet final_abstain_reason = null;\nif (agentAbstained) final_abstain_reason = carry.draft_abstain_reason || 'agent self-abstained';\nelse if (schemaInvalid) final_abstain_reason = 'schema_validation_failed: ' + (schema.errors || []).join('; ');\nelse if (overrideAbstain) final_abstain_reason = 'uncertainty_override: ' + (uncertainty.reason || '');\nelse if (signalAbstain) final_abstain_reason = 'low_signal: ' + uncertainty.signal_strength;\n\nconst failedFields = grounding.failed_fields || [];\nlet payload = { ...(carry.draft_payload || {}) };\nlet reasoning_trace = (carry.draft_reasoning_trace || []).filter(r => !failedFields.includes(r.field));\nfor (const f of failedFields) {\n  const parts = f.split('.');\n  if (parts.length === 1) payload[parts[0]] = null;\n  else if (parts.length === 2 && payload[parts[0]] && typeof payload[parts[0]] === 'object') {\n    payload[parts[0]][parts[1]] = parts[0] === 'meddpicc' ? '' : null;\n  }\n}\n\nconst groundedCount = grounding.grounded_count || 0;\nconst totalClaims = grounding.total_claims || 0;\nconst confidence = totalClaims === 0 ? (final_abstain ? 0.85 : 0.5) : Math.max(0.05, Math.min(0.99, groundedCount / totalClaims));\npayload.confidence = confidence;\n\nif (final_abstain) {\n  payload.stage = null; payload.amount_usd = null; payload.close_date = null;\n  payload.next_step = null; payload.meddpicc = null; payload.risks = null;\n  if (!payload.last_touch_summary) payload.last_touch_summary = 'No actionable update.';\n}\n\nreturn [{ json: {\n  opportunity_id: carry.opportunity_id,\n  abstain: final_abstain, abstain_reason: final_abstain_reason,\n  payload, reasoning_trace: final_abstain ? [] : reasoning_trace,\n  validation: {\n    grounding: {all_grounded: grounding.all_grounded, grounded_count: groundedCount, total_claims: totalClaims, failed_fields: failedFields, summary: grounding.summary},\n    schema: {valid: schema.valid, errors: schema.errors || [], warnings: schema.warnings || []},\n    uncertainty: {signal_strength: uncertainty.signal_strength, should_abstain: uncertainty.should_abstain, overrides_sonnet: uncertainty.overrides_sonnet, flags: uncertainty.flags || [], reason: uncertainty.reason},\n    quality_checks: carry.quality_checks\n  },\n  meta: {\n    processed_at: new Date().toISOString(),\n    agent_model: 'claude-haiku-4-5',\n    reviewer_model: 'deterministic_heuristics_v1',\n    path_taken: 'deterministic_fallback',\n    review_quality_score: carry.quality_score,\n    _test_meta: carry._test_meta\n  }\n}}];\n"
+      },
+      "id": "merge-validations",
+      "name": "merge_validations",
+      "position": [
+        4112,
+        672
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// unify: pass-through (the merge logic already happened in either branch)\nreturn [{ json: $input.first().json }];\n"
+      },
+      "id": "unify",
+      "name": "unify",
+      "position": [
+        4336,
+        576
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "amount": 65
+      },
+      "id": "rate-limit-wait",
+      "name": "rate_limit_wait",
+      "position": [
+        4560,
+        704
+      ],
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "webhookId": "05d3d3a1-2694-4a02-8d0c-3c56d0919ff3"
+    },
+    {
+      "parameters": {
+        "jsCode": "const all = $input.all();\nlet updates = 0, abstains = 0, by_path = {review_agent: 0, deterministic_fallback: 0};\nfor (const item of all) {\n  if (item.json.abstain) abstains++; else updates++;\n  const path = item.json.meta && item.json.meta.path_taken;\n  if (path && by_path[path] !== undefined) by_path[path]++;\n}\nreturn [{ json: {\n  run_summary: updates + ' update(s), ' + abstains + ' abstain(s)',\n  total: all.length, by_path,\n  results: all.map(i => i.json)\n}}];\n"
+      },
+      "id": "final-aggregator",
+      "name": "final_aggregator",
+      "position": [
+        1440,
+        272
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "raw_transcripts_source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "raw_transcripts_source": {
+      "main": [
+        [
+          {
+            "node": "text_pre_processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "text_pre_processor": {
+      "main": [
+        [
+          {
+            "node": "transcript_reader",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transcript_reader": {
+      "main": [
+        [
+          {
+            "node": "loop_over_items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "loop_over_items": {
+      "main": [
+        [
+          {
+            "node": "final_aggregator",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "extraction_agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extraction_model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "extraction_agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extraction_agent": {
+      "main": [
+        [
+          {
+            "node": "extraction_post_normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extraction_post_normalizer": {
+      "main": [
+        [
+          {
+            "node": "review_agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "review_model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "review_agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_quote_grounding": {
+      "ai_tool": [
+        [
+          {
+            "node": "review_agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_schema_validator": {
+      "ai_tool": [
+        [
+          {
+            "node": "review_agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tool_uncertainty_check": {
+      "ai_tool": [
+        [
+          {
+            "node": "review_agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "review_agent": {
+      "main": [
+        [
+          {
+            "node": "review_post_normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "review_post_normalizer": {
+      "main": [
+        [
+          {
+            "node": "IF_quality_gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_quality_gate": {
+      "main": [
+        [
+          {
+            "node": "finalize_from_review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "call_quote_grounding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "finalize_from_review": {
+      "main": [
+        [
+          {
+            "node": "unify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "call_quote_grounding": {
+      "main": [
+        [
+          {
+            "node": "merge_grounding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "merge_grounding": {
+      "main": [
+        [
+          {
+            "node": "call_schema_validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "call_schema_validator": {
+      "main": [
+        [
+          {
+            "node": "merge_schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "merge_schema": {
+      "main": [
+        [
+          {
+            "node": "call_uncertainty_check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "call_uncertainty_check": {
+      "main": [
+        [
+          {
+            "node": "merge_validations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "merge_validations": {
+      "main": [
+        [
+          {
+            "node": "unify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "unify": {
+      "main": [
+        [
+          {
+            "node": "rate_limit_wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "rate_limit_wait": {
+      "main": [
+        [
+          {
+            "node": "loop_over_items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "Q7Re72V4C7cxIQNR"
+  },
+  "pinData": {},
+  "description": null
+}

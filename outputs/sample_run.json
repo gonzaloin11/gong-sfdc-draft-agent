@@ -1,0 +1,174 @@
+{
+  "_note": "Sample output from the final aggregator after running both transcripts end-to-end. OPP-001 (rich) → review_agent approved a full payload. OPP-002 (thin) → review_agent confirmed abstain. Both via the agent path (review_quality_score: 5/5).",
+  "_generated_at": "2026-05-01T18:41:28.486Z",
+  "run_summary": "1 update(s), 1 abstain(s)",
+  "total": 2,
+  "by_path": {
+    "review_agent": 2,
+    "deterministic_fallback": 0
+  },
+  "results": [
+    {
+      "opportunity_id": "OPP-001",
+      "abstain": false,
+      "abstain_reason": null,
+      "payload": {
+        "opportunity_id": "OPP-001",
+        "stage": "proposal",
+        "amount_usd": 120000,
+        "close_date": "2026-10-15",
+        "next_step": {
+          "description": "Send revised annual quote and one-pager on stage-gate integration; loop in Ben and CMO",
+          "owner": "AE",
+          "due_date": "2026-05-02"
+        },
+        "meddpicc": {
+          "metrics": "",
+          "economic_buyer": "CMO",
+          "decision_criteria": "Speed-to-insight; stage-gate integration",
+          "decision_process": "Ben (Procurement), Priya, CMO sign-off",
+          "paper_process": "Annual contract; integration requirements in writing",
+          "identify_pain": "",
+          "champion": "Priya",
+          "competition": "Spoonshot"
+        },
+        "risks": [
+          "Spoonshot aggressive pricing",
+          "Stage-gate integration must be documented to close"
+        ],
+        "last_touch_summary": "Priya confirmed $120k annual, early Q4 close, CMO as economic buyer and signer; Spoonshot competitive threat identified.",
+        "confidence": 0.82
+      },
+      "reasoning_trace": [
+        {
+          "field": "amount_usd",
+          "value": 120000,
+          "quote": "He's fine with the $120k range but wants annual not quarterly.",
+          "timestamp": "[00:18]",
+          "utterance_index": 1
+        },
+        {
+          "field": "stage",
+          "value": "proposal",
+          "quote": "I'll send a revised quote tonight annual, and a one-pager on stage-gate integration by Friday.",
+          "timestamp": "[02:05]",
+          "utterance_index": 6
+        },
+        {
+          "field": "close_date",
+          "value": "2026-10-15",
+          "quote": "Actually pushing to early Q4 now.",
+          "timestamp": "[01:30]",
+          "utterance_index": 5
+        },
+        {
+          "field": "next_step.due_date",
+          "value": "2026-05-02",
+          "quote": "I'll send a revised quote tonight annual, and a one-pager on stage-gate integration by Friday.",
+          "timestamp": "[02:05]",
+          "utterance_index": 6
+        },
+        {
+          "field": "economic_buyer",
+          "value": "CMO",
+          "quote": "CMO will be the signer.",
+          "timestamp": "[02:20]",
+          "utterance_index": 7
+        },
+        {
+          "field": "decision_criteria",
+          "value": "Speed-to-insight; stage-gate integration",
+          "quote": "Speed is #1. Second is how well it integrates with our innovation stage-gate. We'd want that in writing.",
+          "timestamp": "[00:45]",
+          "utterance_index": 3
+        },
+        {
+          "field": "champion",
+          "value": "Priya",
+          "quote": "Thanks for the time, Priya.",
+          "timestamp": "[00:02]",
+          "utterance_index": 0
+        },
+        {
+          "field": "competition",
+          "value": "Spoonshot",
+          "quote": "I saw Spoonshot in market last week. The demo was lightweight but the price was aggressive.",
+          "timestamp": "[02:55]",
+          "utterance_index": 9
+        },
+        {
+          "field": "risks",
+          "value": "Spoonshot aggressive pricing",
+          "quote": "I saw Spoonshot in market last week. The demo was lightweight but the price was aggressive. You'll need to be ready for that.",
+          "timestamp": "[02:55]",
+          "utterance_index": 9
+        }
+      ],
+      "validation": {
+        "review_verdict_action": "approve",
+        "review_verdict_reason": "All quotes grounded (9/9), schema valid, strong signal strength with no override flag. Draft approved unchanged.",
+        "tool_summary": {
+          "quote_grounding": { "all_grounded": true, "failed_fields": [] },
+          "schema": { "valid": true, "errors": [] },
+          "uncertainty": { "signal_strength": "strong", "overrides_sonnet": false }
+        },
+        "quality_checks": {
+          "parseable": true,
+          "valid_action": true,
+          "payload_shape": true,
+          "tools_invoked": true,
+          "tool_summary_evidence_count": 3,
+          "internally_consistent": true
+        }
+      },
+      "meta": {
+        "processed_at": "2026-05-01T18:40:10.082Z",
+        "agent_model": "claude-haiku-4-5",
+        "reviewer_model": "claude-sonnet-4-5",
+        "path_taken": "review_agent",
+        "review_quality_score": 5
+      }
+    },
+    {
+      "opportunity_id": "OPP-002",
+      "abstain": true,
+      "abstain_reason": "Abstain confirmed: draft_abstain=true, schema valid for abstain mode, uncertainty_check confirms should_abstain=true with weak signal (smalltalk_detected, vague_commitment). No quote grounding needed for abstain.",
+      "payload": {
+        "opportunity_id": "OPP-002",
+        "stage": null,
+        "amount_usd": null,
+        "close_date": null,
+        "next_step": null,
+        "meddpicc": null,
+        "risks": null,
+        "last_touch_summary": "Champion waiting on finance feedback, vague two-week follow-up.",
+        "confidence": 0.15
+      },
+      "reasoning_trace": [],
+      "validation": {
+        "review_verdict_action": "abstain",
+        "review_verdict_reason": "Abstain confirmed: draft_abstain=true, schema valid for abstain mode, uncertainty_check confirms should_abstain=true with weak signal (smalltalk_detected, vague_commitment). No quote grounding needed for abstain.",
+        "tool_summary": {
+          "quote_grounding": null,
+          "schema": { "valid": true, "errors": [] },
+          "uncertainty": { "signal_strength": "weak", "overrides_sonnet": false }
+        },
+        "quality_checks": {
+          "parseable": true,
+          "valid_action": true,
+          "payload_shape": true,
+          "tools_invoked": true,
+          "tool_summary_evidence_count": 2,
+          "internally_consistent": true
+        }
+      },
+      "meta": {
+        "processed_at": "2026-05-01T18:41:28.486Z",
+        "agent_model": "claude-haiku-4-5",
+        "reviewer_model": "claude-sonnet-4-5",
+        "path_taken": "review_agent",
+        "review_quality_score": 5
+      }
+    }
+  ]
+}

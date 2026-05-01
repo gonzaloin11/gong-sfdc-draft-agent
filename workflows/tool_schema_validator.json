@@ -1,0 +1,64 @@
+{
+  "name": "TASTEWISE - Tool: schema_validator",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Tool: schema_validator\n**Type**: Deterministic Tool (Code JS, no AI)\n**Required by take-home spec** (Tool #2)\n\n**Input**:\n```\n{\n  candidate_payload: { ...SFDC-lite shape... },\n  abstain_mode: boolean\n}\n```\n\n**Output**:\n```\n{\n  valid: boolean,\n  errors: [string],\n  warnings: [string],\n  validated_payload: object | null\n}\n```\n\n**Called by**: Review Agent (Sonnet 4.5) before emitting final answer.\n\n**Validation modes**:\n- `abstain_mode: true`  → only opportunity_id, last_touch_summary, confidence required; everything else MUST be null\n- `abstain_mode: false` → full SFDC-lite schema: required fields, enum values, type coercion, format checks\n\n**Production extension** (writeup): adds Salesforce-specific format checks (18-char IDs, stage transition rules, required-by-stage gates). v1 covers shape + types + enums.",
+        "height": 540,
+        "width": 480
+      },
+      "id": "sticky-tool-card",
+      "name": "Sticky Note",
+      "position": [-240, 80],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "inputSource": "jsonExample",
+        "jsonExample": "{\n  \"candidate_payload\": {\n    \"opportunity_id\": \"OPP-001\",\n    \"stage\": \"solution_design\",\n    \"amount_usd\": 120000,\n    \"close_date\": \"2026-10-15\",\n    \"next_step\": {\n      \"description\": \"Send revised quote and stage-gate one-pager\",\n      \"owner\": \"AE\",\n      \"due_date\": \"2026-05-02\"\n    },\n    \"meddpicc\": {\n      \"metrics\": \"\",\n      \"economic_buyer\": \"CMO\",\n      \"decision_criteria\": \"Speed-to-insight, stage-gate integration\",\n      \"decision_process\": \"AE -> Procurement -> CMO sign-off\",\n      \"paper_process\": \"Annual contract\",\n      \"identify_pain\": \"\",\n      \"champion\": \"Priya\",\n      \"competition\": \"Spoonshot\"\n    },\n    \"risks\": [\"Spoonshot competing with aggressive pricing\"],\n    \"last_touch_summary\": \"Priya confirmed annual $120k pricing and CMO signing\",\n    \"confidence\": 0.85\n  },\n  \"abstain_mode\": false\n}"
+      },
+      "id": "execute-trigger",
+      "name": "Execute Workflow Trigger",
+      "position": [240, 480],
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// schema_validator (Tool #2 REQUIRED by take-home spec)\n// Branded for writeup as: 'Deterministic Tool: Schema Validator'\n//\n// Pure deterministic JSON schema validation. No AI. Validates a candidate\n// SFDC-lite payload against the take-home schema, with two modes:\n//   abstain_mode: false -> full schema validation (rich update path)\n//   abstain_mode: true  -> minimal validation (abstain path)\n//\n// Input  : { candidate_payload: object, abstain_mode: boolean }\n// Output : { valid, errors[], warnings[], validated_payload }\n//\n// Errors are blocking (valid=false). Warnings are advisory (valid=true).\n// ============================================================================\n\nconst input = $input.first().json;\nconst payload = input.candidate_payload;\nconst abstainMode = input.abstain_mode === true;\n\nconst errors = [];\nconst warnings = [];\n\nconst VALID_STAGES = [\n  'prospecting',\n  'discovery',\n  'solution_design',\n  'proposal',\n  'negotiation',\n  'closed_won',\n  'closed_lost'\n];\n\nconst MEDDPICC_KEYS = [\n  'metrics',\n  'economic_buyer',\n  'decision_criteria',\n  'decision_process',\n  'paper_process',\n  'identify_pain',\n  'champion',\n  'competition'\n];\n\n// Helpers ---------------------------------------------------------------\nfunction isString(v)    { return typeof v === 'string'; }\nfunction isNumber(v)    { return typeof v === 'number' && !Number.isNaN(v); }\nfunction isObject(v)    { return v !== null && typeof v === 'object' && !Array.isArray(v); }\nfunction isArray(v)     { return Array.isArray(v); }\nfunction isISO(v)       { return isString(v) && /^\\d{4}-\\d{2}-\\d{2}(T.*)?$/.test(v) && !Number.isNaN(Date.parse(v)); }\nfunction isStringOrEmpty(v) { return v === '' || isString(v); }\n\n// --- Top-level guard ---------------------------------------------------\nif (!isObject(payload)) {\n  return [{ json: {\n    valid: false,\n    errors: ['candidate_payload missing or not an object'],\n    warnings: [],\n    validated_payload: null\n  }}];\n}\n\n// --- Always required (both modes) --------------------------------------\nif (!isString(payload.opportunity_id) || payload.opportunity_id.length === 0) {\n  errors.push('opportunity_id: required string');\n}\n\nif (!isString(payload.last_touch_summary) || payload.last_touch_summary.length === 0) {\n  errors.push('last_touch_summary: required non-empty string');\n}\n\nif (!isNumber(payload.confidence) || payload.confidence < 0 || payload.confidence > 1) {\n  errors.push('confidence: required float in [0, 1]');\n}\n\n// =======================================================================\n// MODE 1: ABSTAIN\n// Everything except {id, last_touch_summary, confidence} MUST be null\n// =======================================================================\nif (abstainMode) {\n  const mustBeNull = ['stage', 'amount_usd', 'close_date', 'next_step', 'meddpicc', 'risks'];\n\n  for (let i = 0; i < mustBeNull.length; i++) {\n    const key = mustBeNull[i];\n    if (payload[key] !== null && payload[key] !== undefined) {\n      const got = JSON.stringify(payload[key]).substring(0, 40);\n      errors.push('abstain_mode: ' + key + ' must be null (got ' + got + ')');\n    }\n  }\n\n  return [{ json: {\n    valid: errors.length === 0,\n    errors: errors,\n    warnings: warnings,\n    validated_payload: errors.length === 0 ? payload : null\n  }}];\n}\n\n// =======================================================================\n// MODE 2: FULL UPDATE  --  rich SFDC-lite payload\n// =======================================================================\n\n// stage --------------------------------------------------------------------\nif (!isString(payload.stage)) {\n  errors.push('stage: required string');\n} else if (VALID_STAGES.indexOf(payload.stage) === -1) {\n  errors.push('stage: must be one of ' + VALID_STAGES.join('|') + ' (got \"' + payload.stage + '\")');\n}\n\n// amount_usd ---------------------------------------------------------------\nif (payload.amount_usd !== null && payload.amount_usd !== undefined) {\n  if (!isNumber(payload.amount_usd)) {\n    errors.push('amount_usd: must be a number or null');\n  } else if (payload.amount_usd < 0) {\n    errors.push('amount_usd: must be non-negative');\n  }\n}\n\n// close_date ---------------------------------------------------------------\nif (payload.close_date !== null && payload.close_date !== undefined) {\n  if (!isISO(payload.close_date)) {\n    errors.push('close_date: must be ISO date (got \"' + payload.close_date + '\")');\n  }\n}\n\n// next_step ----------------------------------------------------------------\nif (payload.next_step !== null && payload.next_step !== undefined) {\n  if (!isObject(payload.next_step)) {\n    errors.push('next_step: must be an object or null');\n  } else {\n    if (!isString(payload.next_step.description) || payload.next_step.description.length === 0) {\n      errors.push('next_step.description: required non-empty string');\n    }\n    if (!isString(payload.next_step.owner) || payload.next_step.owner.length === 0) {\n      errors.push('next_step.owner: required non-empty string');\n    }\n    if (!isISO(payload.next_step.due_date)) {\n      errors.push('next_step.due_date: must be ISO date (got \"' + payload.next_step.due_date + '\")');\n    }\n  }\n} else {\n  warnings.push('next_step: null in update mode (uncommon for rich-signal calls)');\n}\n\n// meddpicc -----------------------------------------------------------------\nif (!isObject(payload.meddpicc)) {\n  errors.push('meddpicc: required object with 8 string fields');\n} else {\n  for (let i = 0; i < MEDDPICC_KEYS.length; i++) {\n    const k = MEDDPICC_KEYS[i];\n    if (!isStringOrEmpty(payload.meddpicc[k])) {\n      errors.push('meddpicc.' + k + ': must be a string (use \"\" if no signal, never null)');\n    }\n  }\n  let filled = 0;\n  for (let i = 0; i < MEDDPICC_KEYS.length; i++) {\n    const v = payload.meddpicc[MEDDPICC_KEYS[i]];\n    if (v && v.length > 0) filled++;\n  }\n  if (filled === 0) {\n    warnings.push('meddpicc: all 8 fields empty in update mode (rich-signal call expected at least one)');\n  }\n}\n\n// risks --------------------------------------------------------------------\nif (!isArray(payload.risks)) {\n  errors.push('risks: must be an array (use [] if none)');\n} else {\n  for (let i = 0; i < payload.risks.length; i++) {\n    if (!isString(payload.risks[i]) || payload.risks[i].length === 0) {\n      errors.push('risks[' + i + ']: must be a non-empty string');\n    }\n  }\n}\n\n// --- Final response ----------------------------------------------------\nreturn [{ json: {\n  valid: errors.length === 0,\n  errors: errors,\n  warnings: warnings,\n  validated_payload: errors.length === 0 ? payload : null\n}}];\n"
+      },
+      "id": "validate",
+      "name": "validate",
+      "position": [480, 480],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "validate",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed"
+  },
+  "pinData": {},
+  "description": null
+}

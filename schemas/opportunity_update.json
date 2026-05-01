@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SFDC-Lite Opportunity Update",
+  "description": "Mock Salesforce opportunity update payload. The agent emits this shape per call. Two valid forms: a 'rich update' (abstain=false, all fields populated) and an 'abstain' (abstain=true, only opportunity_id/last_touch_summary/confidence populated).",
+  "type": "object",
+  "required": [
+    "opportunity_id",
+    "abstain",
+    "abstain_reason",
+    "payload",
+    "reasoning_trace"
+  ],
+  "properties": {
+    "opportunity_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "External opportunity identifier (e.g. OPP-001)."
+    },
+    "abstain": {
+      "type": "boolean",
+      "description": "True when the agent decided not to propose any field updates (transcript was too thin)."
+    },
+    "abstain_reason": {
+      "type": ["string", "null"],
+      "description": "One-sentence explanation when abstain=true. Null when abstain=false."
+    },
+    "payload": {
+      "type": "object",
+      "required": ["opportunity_id", "last_touch_summary", "confidence"],
+      "properties": {
+        "opportunity_id": { "type": "string" },
+        "stage": {
+          "type": ["string", "null"],
+          "enum": [
+            "prospecting",
+            "discovery",
+            "solution_design",
+            "proposal",
+            "negotiation",
+            "closed_won",
+            "closed_lost",
+            null
+          ]
+        },
+        "amount_usd": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "close_date": {
+          "type": ["string", "null"],
+          "format": "date",
+          "description": "ISO YYYY-MM-DD."
+        },
+        "next_step": {
+          "type": ["object", "null"],
+          "required": ["description", "owner", "due_date"],
+          "properties": {
+            "description": { "type": "string", "minLength": 1 },
+            "owner": { "type": "string", "minLength": 1 },
+            "due_date": { "type": "string", "format": "date" }
+          }
+        },
+        "meddpicc": {
+          "type": ["object", "null"],
+          "required": [
+            "metrics",
+            "economic_buyer",
+            "decision_criteria",
+            "decision_process",
+            "paper_process",
+            "identify_pain",
+            "champion",
+            "competition"
+          ],
+          "properties": {
+            "metrics": { "type": "string", "description": "Empty string when no signal, never null." },
+            "economic_buyer": { "type": "string" },
+            "decision_criteria": { "type": "string" },
+            "decision_process": { "type": "string" },
+            "paper_process": { "type": "string" },
+            "identify_pain": { "type": "string" },
+            "champion": { "type": "string" },
+            "competition": { "type": "string" }
+          }
+        },
+        "risks": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "last_touch_summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "1-sentence summary; populated even when abstain=true."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "reasoning_trace": {
+      "type": "array",
+      "description": "Per-field grounding evidence. Empty array when abstain=true.",
+      "items": {
+        "type": "object",
+        "required": ["field", "value", "quote", "timestamp"],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Dotted path of the field being grounded (e.g. 'amount_usd', 'next_step.due_date', 'champion')."
+          },
+          "value": {
+            "description": "The value claimed for this field. Type varies."
+          },
+          "quote": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Verbatim substring from the cited utterance. Must contain the claimed value."
+          },
+          "timestamp": {
+            "type": "string",
+            "pattern": "^\\[\\d{2}:\\d{2}\\]$",
+            "description": "Must equal utterance.timestamp_raw exactly, format [MM:SS]."
+          },
+          "utterance_index": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": { "abstain": { "const": true } }
+  },
+  "then": {
+    "properties": {
+      "payload": {
+        "properties": {
+          "stage": { "const": null },
+          "amount_usd": { "const": null },
+          "close_date": { "const": null },
+          "next_step": { "const": null },
+          "meddpicc": { "const": null },
+          "risks": { "const": null }
+        }
+      },
+      "reasoning_trace": { "maxItems": 0 }
+    }
+  }
+}

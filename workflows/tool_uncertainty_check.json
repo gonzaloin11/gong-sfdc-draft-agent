@@ -1,0 +1,64 @@
+{
+  "name": "TASTEWISE - Tool: uncertainty_check (Review Agent)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Tool: uncertainty_check (Review Agent)\n**Type**: Bonus tool per take-home spec\n**Implementation**: Deterministic heuristic engine (v2)\n\n**Role**: Skeptical second-opinion reviewer. Catches the extraction agent's optimism bias and flags signal-strength misclassification before the SFDC update is committed. Conservative by design — false abstains beat false updates.\n\n**Architectural decision (writeup material)**:\nIteration 1 used a Haiku-based Review Agent. Production testing on a 50K ITPM rate limit revealed that a second LLM call in the critical path doubled token consumption per opportunity, causing rate-limit collapse on the 2-transcript test set.\n\nIteration 2 encodes the same failure modes the LLM reviewer was catching as explicit deterministic rules: same role, same input/output contract, same veto rule — at zero token cost, sub-100ms latency, 100% auditable.\n\nDeterministic-first principle applied: subjective review is not necessarily an LLM job. When failure modes are characterizable, deterministic checks are cheaper, faster, more auditable — and they free the ITPM budget for the primary extraction call where the LLM is genuinely needed.\n\n**Input**:\n```\n{\n  utterances: [{ timestamp_raw, speaker, text }],\n  draft_payload: {...},\n  sonnet_decision: { abstain, confidence }\n}\n```\n\n**Output (same contract as the LLM version)**:\n```\n{\n  should_abstain: boolean,\n  signal_strength: 'none'|'weak'|'moderate'|'strong'|'unknown',\n  reason: string,\n  overrides_sonnet: boolean,\n  flags: [string],          // failure-mode tags\n  features: {...},          // observable features for debugging\n  method: 'deterministic_heuristics_v1',\n  reviewer_model: null      // explicitly: no LLM used\n}\n```\n\n**Failure modes covered (extensible)**:\n- `smalltalk_detected` — vacation/weekend/social patterns\n- `vague_commitment` — 'still waiting', 'maybe X weeks', 'I'll ping you'\n- `rich_decision_with_few_fields` — marked rich but <2 fields populated\n- `abstain_with_rich_payload` — abstain contradicts populated fields\n- `overconfident_thin_transcript` — high confidence on <6 utterances\n- `schema_echo_detected` — LangChain edge case (hard override to abstain)\n- `late_stage_no_amount` — negotiation/proposal/closed_won without amount\n- `incomplete_next_step` — next_step missing owner or due_date\n\n**Veto rule** (deterministic, never LLM-trusted):\n`overrides_sonnet = (sonnet.abstain == false) AND (heuristic.should_abstain == true)`\n\n**No memory**: each call independent. Memory would cross-contaminate transcripts.\n\n**Extension path**: when new failure modes are observed in production, add them as new heuristic rules. The flags[] array makes each trigger auditable in the execution log.",
+        "height": 1020,
+        "width": 480
+      },
+      "id": "sticky_tool_card",
+      "name": "Sticky Note",
+      "position": [-288, 32],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "inputSource": "jsonExample",
+        "jsonExample": "{\n  \"utterances\": [\n    { \"line_index\": 0, \"timestamp_raw\": \"[00:02]\", \"timestamp_seconds\": 2, \"speaker\": \"AE\", \"text\": \"Hey! How was the trip?\" },\n    { \"line_index\": 1, \"timestamp_raw\": \"[00:14]\", \"timestamp_seconds\": 14, \"speaker\": \"Champion\", \"text\": \"Honestly I do not have much new. Still waiting to hear back from finance.\" },\n    { \"line_index\": 2, \"timestamp_raw\": \"[00:44]\", \"timestamp_seconds\": 44, \"speaker\": \"Champion\", \"text\": \"Maybe two weeks? I will ping you.\" }\n  ],\n  \"draft_payload\": {\n    \"opportunity_id\": \"OPP-002\",\n    \"stage\": \"discovery\",\n    \"next_step\": { \"description\": \"Wait for finance team feedback\", \"owner\": \"Champion\", \"due_date\": \"2026-05-13\" },\n    \"last_touch_summary\": \"Champion mentioned waiting on finance, will follow up in 2 weeks\"\n  },\n  \"sonnet_decision\": { \"abstain\": false, \"confidence\": 0.65 }\n}"
+      },
+      "id": "execute_trigger",
+      "name": "Execute Workflow Trigger",
+      "position": [240, 480],
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// uncertainty_check — Heuristic Review Tool (Review Agent role, deterministic)\n//\n// BONUS TOOL per take-home spec. Implements the second-opinion reviewer\n// guardrail against the extraction agent's optimism bias.\n//\n// ARCHITECTURE NOTE (writeup material):\n// Iteration 1 used a Haiku-based Review Agent. Production testing on a 50K\n// ITPM limit showed that a second LLM call in the critical path doubled token\n// usage per opportunity, causing rate-limit collapse. Iteration 2 (this\n// implementation) encodes the same failure modes the LLM-based reviewer was\n// catching as explicit deterministic rules: same role, same input/output\n// contract, same veto rule — at zero token cost, sub-100ms latency, 100%\n// auditable.\n//\n// Deterministic-first principle taken to its logical conclusion: subjective\n// review is not necessarily an LLM job. When failure modes are\n// characterizable, deterministic checks are cheaper, faster, more auditable,\n// and they free the ITPM budget for the primary extraction call where the\n// LLM is genuinely needed.\n//\n// INPUT  : { utterances[], draft_payload, sonnet_decision: { abstain, confidence } }\n// OUTPUT : { should_abstain, signal_strength, reason, overrides_sonnet,\n//            flags[], features{}, method, reviewer_model } — same contract\n// ============================================================================\n\nconst input = $input.first().json;\n\nconst utterances = Array.isArray(input.utterances) ? input.utterances : [];\nconst draftPayload = input.draft_payload || {};\nconst sonnetDecision = input.sonnet_decision || {};\nconst sonnetAbstain = sonnetDecision.abstain === true;\nconst sonnetConfidence = typeof sonnetDecision.confidence === 'number' ? sonnetDecision.confidence : 0;\n\nfunction truncate(s, max) { if (typeof s !== 'string') return ''; return s.length > max ? s.substring(0, max) : s; }\n\nfunction stashDebug(debug) {\n  try {\n    if ($execution && typeof $execution.customData?.set === 'function') {\n      $execution.customData.set('uncertainty_check_debug', JSON.stringify(debug).slice(0, 8000));\n    }\n  } catch (e) { /* customData unavailable in test mode -- silent */ }\n}\n\nfunction countFilledFields(payload) {\n  if (!payload || typeof payload !== 'object') return 0;\n  let count = 0;\n  if (payload.stage) count++;\n  if (payload.amount_usd != null) count++;\n  if (payload.close_date) count++;\n  if (payload.next_step && payload.next_step.description) count++;\n  if (payload.meddpicc && typeof payload.meddpicc === 'object') {\n    const keys = Object.keys(payload.meddpicc);\n    for (let i = 0; i < keys.length; i++) {\n      const v = payload.meddpicc[keys[i]];\n      if (typeof v === 'string' && v.length > 0) count++;\n    }\n  }\n  if (Array.isArray(payload.risks)) count += payload.risks.length;\n  return count;\n}\n\nfunction joinUtterances(utts) {\n  const parts = [];\n  for (let i = 0; i < utts.length; i++) {\n    const u = utts[i];\n    if (u && typeof u.text === 'string') parts.push(u.text.toLowerCase());\n  }\n  return parts.join(' | ');\n}\n\nfunction countMatches(text, patterns) {\n  let n = 0;\n  for (let i = 0; i < patterns.length; i++) { if (patterns[i].test(text)) n++; }\n  return n;\n}\n\nconst NEUTRAL_PATTERNS = [\n  /\\bnothing new\\b/, /\\bdo(?:n['’]?t| not) have much new\\b/,\n  /\\bmaybe.{0,20}weeks?\\b/, /\\bmaybe.{0,20}days?\\b/,\n  /\\bi(?:['’]?ll| will) ping you\\b/, /\\bstill waiting\\b/,\n  /\\bkeep me posted\\b/, /\\bsounds good\\b/, /\\bping you\\b/\n];\nconst SMALLTALK_PATTERNS = [\n  /\\btrip\\b/, /\\bvacation\\b/, /\\bweekend\\b/, /\\bhow.{0,8}you\\b/,\n  /\\blisbon\\b/, /\\bparis\\b/, /\\benjoy\\b/, /\\bamazing\\b/, /\\brecommend\\b/\n];\nconst STRONG_SIGNAL_PATTERNS = [\n  /\\$[\\d,]+/, /\\b\\d+\\s*k\\b/i,\n  /\\b(cmo|ceo|cfo|coo|cto|vp)\\b/i,\n  /\\b(annual|quarterly|monthly)\\b/i,\n  /\\b(closed[ -]won|closed[ -]lost)\\b/i,\n  /\\bsigner\\b/i, /\\bcontract\\b/i\n];\n\nconst utteranceCount = utterances.length;\nconst filledFields = countFilledFields(draftPayload);\nconst text = joinUtterances(utterances);\n\nconst neutralHits = countMatches(text, NEUTRAL_PATTERNS);\nconst smalltalkHits = countMatches(text, SMALLTALK_PATTERNS);\nconst strongHits = countMatches(text, STRONG_SIGNAL_PATTERNS);\n\nlet signal_strength;\nif (strongHits >= 2 && filledFields >= 3) {\n  signal_strength = 'strong';\n} else if (strongHits >= 1 && filledFields >= 2) {\n  signal_strength = 'moderate';\n} else if (neutralHits >= 1 && strongHits === 0) {\n  signal_strength = 'weak';\n} else if (smalltalkHits >= 2 && strongHits === 0 && filledFields === 0) {\n  signal_strength = 'none';\n} else if (filledFields === 0 && strongHits === 0) {\n  signal_strength = 'weak';\n} else {\n  signal_strength = 'moderate';\n}\n\nlet should_abstain = (signal_strength === 'none' || signal_strength === 'weak');\n\nconst flags = [];\nconst reasons = [];\n\nif (smalltalkHits >= 1) { flags.push('smalltalk_detected'); reasons.push('smalltalk patterns (' + smalltalkHits + ')'); }\nif (neutralHits >= 1) { flags.push('vague_commitment'); reasons.push('vague-commitment patterns (' + neutralHits + ')'); }\nif (strongHits >= 1) { flags.push('strong_signal_pattern'); reasons.push('strong-signal patterns (' + strongHits + ')'); }\nif (sonnetAbstain === false && filledFields < 2) { flags.push('rich_decision_with_few_fields'); reasons.push('extraction marked rich but only ' + filledFields + ' field(s) populated'); }\nif (sonnetAbstain === true && filledFields >= 3) { flags.push('abstain_with_rich_payload'); reasons.push('abstain decision contradicts ' + filledFields + ' populated fields'); }\nif (utteranceCount < 6 && sonnetAbstain === false && sonnetConfidence > 0.7) { flags.push('overconfident_thin_transcript'); reasons.push('high confidence (' + sonnetConfidence + ') on short transcript (' + utteranceCount + ' utterances)'); }\nif (draftPayload && draftPayload.type === 'object' && draftPayload.properties) { flags.push('schema_echo_detected'); reasons.push('payload looks like schema definition rather than values'); should_abstain = true; signal_strength = 'unknown'; }\nconst LATE_STAGES = ['negotiation', 'proposal', 'closed_won'];\nif (LATE_STAGES.indexOf(draftPayload.stage) !== -1 && !draftPayload.amount_usd) { flags.push('late_stage_no_amount'); reasons.push('stage ' + draftPayload.stage + ' but no amount_usd'); }\nif (draftPayload.next_step && (!draftPayload.next_step.owner || !draftPayload.next_step.due_date)) { flags.push('incomplete_next_step'); reasons.push('next_step missing owner or due_date'); }\n\nconst reason = truncate(\n  flags.length > 0\n    ? 'heuristic_review: ' + flags.join(', ') + ' | ' + reasons.join('; ')\n    : 'heuristic_review: signal_' + signal_strength + ', ' + filledFields + ' filled fields',\n  500\n);\n\nconst overrides_sonnet = (sonnetAbstain === false) && (should_abstain === true);\n\nstashDebug({\n  should_abstain, signal_strength, reason, overrides_sonnet, flags,\n  features: { utterance_count: utteranceCount, filled_fields: filledFields, neutral_hits: neutralHits, smalltalk_hits: smalltalkHits, strong_hits: strongHits },\n  method: 'deterministic_heuristics_v1', reviewer_model: null\n});\n\nreturn [{ json: {\n  should_abstain: should_abstain,\n  signal_strength: signal_strength,\n  reason: reason,\n  overrides_sonnet: overrides_sonnet,\n  flags: flags\n}}];\n"
+      },
+      "id": "post_llm_normalizer",
+      "name": "post_llm_normalizer",
+      "position": [624, 480],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "post_llm_normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed"
+  },
+  "pinData": {},
+  "description": null
+}

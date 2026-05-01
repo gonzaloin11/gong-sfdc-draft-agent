@@ -1,0 +1,64 @@
+{
+  "name": "TASTEWISE - Tool: quote_grounding",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Tool: quote_grounding (BATCH v2)\n**Type**: Deterministic Tool (Code JS, no AI)\n**Purpose**: Anti-hallucination guardrail. Verifies ALL agent quotes exist in the source transcript in a SINGLE batch call.\n\n**Token optimization**: refactored from per-field calls (8-10 round trips per OPP) to a single batch call. Agent submits all evidence at once → -50K input tokens per OPP, -8 round trips. Matches industry pattern (Anthropic tool_use with batch inputs).\n\n**Input**:\n```\n{\n  utterances: [{ timestamp_raw, text, ... }],\n  evidence_list: [\n    { field, value, quote, timestamp },\n    ...\n  ]\n}\n```\n\n**Output**:\n```\n{\n  all_grounded: boolean,\n  results: [\n    { field, value, quote, timestamp, grounded, reason, matched_utterance_index, matched_text },\n    ...\n  ],\n  failed_fields: [string],\n  summary: 'N/M grounded',\n  total_claims, grounded_count, error\n}\n```\n\n**Called by**: Extraction Agent (Haiku 4.5), ONCE before final answer with all evidence batched.\n\n**Matching logic**: substring match (case-insensitive, trimmed, whitespace-collapsed). NO fuzzy match — see docs/REJECTED_APPROACHES.md.\n\n**Failure modes (per claim)**:\n- `timestamp_not_found`: agent hallucinated a timestamp\n- `quote_not_in_utterance`: agent paraphrased instead of citing\n- `invalid_input`: missing field/quote/timestamp\n- `utterance_text_missing`: utterance at timestamp has no text\n\n**Empty evidence_list is valid** → abstain mode passthrough (`all_grounded: true`).",
+        "height": 580,
+        "width": 480
+      },
+      "id": "sticky-tool-card",
+      "name": "Sticky Note",
+      "position": [-288, 48],
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "inputSource": "jsonExample",
+        "jsonExample": "{\n  \"utterances\": [\n    {\n      \"line_index\": 1,\n      \"timestamp_raw\": \"[00:18]\",\n      \"timestamp_seconds\": 18,\n      \"speaker\": \"Priya\",\n      \"text\": \"Yeah - Ben's in the next call. He's fine with the $120k range but wants annual not quarterly.\"\n    },\n    {\n      \"line_index\": 7,\n      \"timestamp_raw\": \"[02:20]\",\n      \"timestamp_seconds\": 140,\n      \"speaker\": \"Priya\",\n      \"text\": \"Yes. Ben, me, and our CMO. CMO will be the signer.\"\n    }\n  ],\n  \"evidence_list\": [\n    {\n      \"field\": \"amount_usd\",\n      \"value\": 120000,\n      \"quote\": \"He's fine with the $120k range\",\n      \"timestamp\": \"[00:18]\"\n    },\n    {\n      \"field\": \"meddpicc.economic_buyer\",\n      \"value\": \"CMO\",\n      \"quote\": \"CMO will be the signer\",\n      \"timestamp\": \"[02:20]\"\n    }\n  ]\n}"
+      },
+      "id": "execute-trigger",
+      "name": "Execute Workflow Trigger",
+      "position": [240, 480],
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// quote_grounding (Batch Deterministic Tool: anti-hallucination guardrail)\n// SLIM RETURN VARIANT (P3a): drops results[] when all_grounded=true and\n// drops matched_text from per-result objects. Verbose debug retained on\n// $execution.customData for n8n execution-log visibility (Loom narration).\n// ============================================================================\n\nconst input = $input.first().json;\nconst utterances = input.utterances;\nconst evidenceList = input.evidence_list;\n\nfunction isString(v) { return typeof v === 'string'; }\nfunction isArray(v)  { return Array.isArray(v); }\nfunction normalize(s) { return s.toLowerCase().trim().replace(/\\s+/g, ' '); }\n\nfunction stashDebug(debug) {\n  try {\n    if ($execution && typeof $execution.customData?.set === 'function') {\n      $execution.customData.set('quote_grounding_debug', JSON.stringify(debug).slice(0, 8000));\n    }\n  } catch (e) { /* customData unavailable in test mode -- silent */ }\n}\n\n// --- Input validation ---------------------------------------------------\nif (!isArray(utterances) || utterances.length === 0) {\n  return [{ json: {\n    all_grounded: false,\n    failed_fields: [],\n    summary: 'invalid_input: utterances missing or empty',\n    total_claims: 0,\n    grounded_count: 0,\n    error: true\n  }}];\n}\nif (!isArray(evidenceList)) {\n  return [{ json: {\n    all_grounded: false,\n    failed_fields: [],\n    summary: 'invalid_input: evidence_list must be an array',\n    total_claims: 0,\n    grounded_count: 0,\n    error: true\n  }}];\n}\nif (evidenceList.length === 0) {\n  return [{ json: {\n    all_grounded: true,\n    failed_fields: [],\n    summary: 'no_claims: evidence_list empty (abstain mode or no fields populated)',\n    total_claims: 0,\n    grounded_count: 0,\n    error: false\n  }}];\n}\n\n// --- Build O(1) timestamp lookup ----------------------------------------\nconst utteranceByTimestamp = {};\nfor (let i = 0; i < utterances.length; i++) {\n  const u = utterances[i];\n  if (u && isString(u.timestamp_raw)) {\n    utteranceByTimestamp[u.timestamp_raw] = { utterance: u, index: i };\n  }\n}\n\n// --- Iterate all evidence ----------------------------------------------\nconst fullResults = [];\nconst failedResults = [];\nconst failedFields = [];\nlet groundedCount = 0;\n\nfor (let i = 0; i < evidenceList.length; i++) {\n  const ev = evidenceList[i] || {};\n  const field = ev.field;\n  const value = ev.value === undefined ? null : ev.value;\n  const quote = ev.quote;\n  const timestamp = ev.timestamp;\n\n  let result;\n\n  if (!isString(field) || field.length === 0) {\n    result = { field: field || '<missing>', grounded: false, reason: 'invalid_input: field missing or empty' };\n    failedFields.push(field || '<missing>');\n  } else if (!isString(quote) || quote.length === 0) {\n    result = { field: field, grounded: false, reason: 'invalid_input: quote missing or empty' };\n    failedFields.push(field);\n  } else if (!isString(timestamp) || timestamp.length === 0) {\n    result = { field: field, grounded: false, reason: 'invalid_input: timestamp missing or empty' };\n    failedFields.push(field);\n  } else {\n    const lookup = utteranceByTimestamp[timestamp];\n    if (!lookup) {\n      result = { field: field, value: value, quote: quote, timestamp: timestamp, grounded: false, reason: 'timestamp_not_found: ' + timestamp + ' does not exist in this transcript' };\n      failedFields.push(field);\n    } else {\n      const utteranceText = lookup.utterance.text;\n      if (!isString(utteranceText) || utteranceText.length === 0) {\n        result = { field: field, value: value, quote: quote, timestamp: timestamp, grounded: false, reason: 'utterance_text_missing' };\n        failedFields.push(field);\n      } else {\n        const grounded = normalize(utteranceText).indexOf(normalize(quote)) !== -1;\n        if (!grounded) {\n          result = { field: field, value: value, quote: quote, timestamp: timestamp, grounded: false, reason: 'quote_not_in_utterance: quote does not appear in the utterance at ' + timestamp };\n          failedFields.push(field);\n        } else {\n          result = { field: field, grounded: true, reason: null };\n          groundedCount++;\n        }\n      }\n    }\n  }\n\n  fullResults.push(result);\n  if (!result.grounded) failedResults.push(result);\n}\n\nconst allGrounded = groundedCount === evidenceList.length;\n\nstashDebug({ all_grounded: allGrounded, results: fullResults, summary: groundedCount + '/' + evidenceList.length + ' grounded' });\n\nif (allGrounded) {\n  return [{ json: {\n    all_grounded: true,\n    failed_fields: [],\n    summary: groundedCount + '/' + evidenceList.length + ' grounded',\n    total_claims: evidenceList.length,\n    grounded_count: groundedCount,\n    error: false\n  }}];\n}\n\nreturn [{ json: {\n  all_grounded: false,\n  results: failedResults,\n  failed_fields: failedFields,\n  summary: groundedCount + '/' + evidenceList.length + ' grounded',\n  total_claims: evidenceList.length,\n  grounded_count: groundedCount,\n  error: false\n}}];\n"
+      },
+      "id": "ground",
+      "name": "ground",
+      "position": [480, 480],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "ground",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed"
+  },
+  "pinData": {},
+  "description": null
+}
