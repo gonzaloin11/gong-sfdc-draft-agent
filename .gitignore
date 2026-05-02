@@ -32,3 +32,6 @@ Claude.md
 .env.example
 tools/
 docs/SOPs/
+
+# Handoff staging folder (just a working copy of the deliverables)
+_handoff/

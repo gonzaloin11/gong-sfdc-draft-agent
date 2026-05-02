@@ -226,6 +226,7 @@ See [WRITEUP.md](WRITEUP.md). Top three:
 - Stricter `quote_grounding` that does value-presence checks, not just substring matches.
 - Webhook trigger + Python CLI runner for programmatic invocation.
 
+
 ---
 
 ## What's documented elsewhere

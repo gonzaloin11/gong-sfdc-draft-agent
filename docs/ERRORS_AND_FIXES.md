@@ -572,7 +572,7 @@ Long-term, `quote_grounding` should also do a **value-presence check**: does the
 
 ## Process lesson (meta)
 
-We spent ~5 hours on this with significant back-and-forth. In retrospect, two things would have saved the most time:
+We spent ~2 hours on this with significant back-and-forth. In retrospect, two things would have saved the most time:
 
-1. **Read the API docs for ITPM behavior up front** — specifically what counts toward the limit and over what window. We thought we understood it; we didn't. The "rolling 60s sum across all calls" was the missing piece.
+1. **Review the API docs for ITPM behavior up front** — specifically what counts toward the limit and over what window. We thought we understood it; we didn't. The "rolling 60s sum across all calls" was the missing piece.
 2. **Pick the architecture that satisfies the criterion before optimizing for reliability.** We optimized away the agent's tool-calling because Haiku was unreliable, then had to rebuild it once we realized the criterion required it. The reliability problem was real but the right answer was "use a different model for that step," not "remove the agent loop."
