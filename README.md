@@ -7,7 +7,7 @@ A tool-using agent that reads a mock Gong sales-call transcript and produces a s
 
 Built as four n8n workflows: one main orchestrator (two LLM agents) and three deterministic tools (Code-node sub-workflows).
 
-**▶ Loom walkthrough (≤5 min):** https://www.loom.com/share/80deec92d7fa401093d5e6eb8e50b895
+**▶ Loom walkthrough:** https://www.loom.com/share/80deec92d7fa401093d5e6eb8e50b895
 
 ---
 
