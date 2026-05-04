@@ -235,4 +235,4 @@ See [WRITEUP.md](WRITEUP.md). Top three:
 
 - **Bug log + lessons:** [docs/ERRORS_AND_FIXES.md](docs/ERRORS_AND_FIXES.md). 11 sections covering every concrete failure we hit (Anthropic ITPM, Haiku draft-only behavior, structuredOutputParser interception, the chained-prompt trap, n8n MCP limitations, AI-fillable schema gotcha, `$fromAI` syntax, Code node `runOnceForAllItems` mode silently dropping items, `$('Node').first()` returning the wrong loop iteration, empty-array tool inputs being rejected, citation quality vs. proximity).
 
-- **Reusable subagent prompts:** [docs/SOPs/](docs/SOPs/). Each SOP describes when to use it, the prompt template, edge cases, and the date last verified.
+- **Reusable subagent prompts:** (IN PROGRESS) [docs/SOPs/](docs/SOPs/). Each SOP describes when to use it, the prompt template, edge cases, and the date last verified.
