@@ -226,7 +226,7 @@ The Loom shows:
 See [WRITEUP.md](WRITEUP.md). Top three:
 - A real eval harness (golden-set JSON × N transcripts, computing field-F1 / abstain-accuracy / grounding-pass-rate / agent-path adherence).
 - Stricter `quote_grounding` that does value-presence checks, not just substring matches.
-- Webhook trigger + Python CLI runner for programmatic invocation.
+- Webhook trigger 
 
 
 ---
